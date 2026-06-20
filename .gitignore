@@ -1,0 +1,8 @@
+.env
+venv/
+env2/
+__pycache__/
+*.pyc
+.swiggy_tokens.json
+.vscode/
+*.log
