@@ -69,22 +69,18 @@ async def main():
 
         if isinstance(result, dict):
 
-            # Recommendation display
             if result.get("assistant_response"):
                 print(result["assistant_response"])
 
-            # Follow-up question
             elif result.get("follow_up_question"):
                 print(result["follow_up_question"])
 
-            # Interrupt messages
             elif result.get("__interrupt__"):
                 interrupt = result["__interrupt__"]
 
                 if len(interrupt) > 0:
                     print(interrupt[0].value)
 
-            # Final confirmation if you add later
             elif result.get("order_confirmation"):
                 print(result["order_confirmation"])
 
