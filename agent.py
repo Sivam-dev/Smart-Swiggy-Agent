@@ -42,7 +42,7 @@ class AgentState(TypedDict):
     confirm : bool|None = None
     placed_order: str | None = None
     user_selection: str | None = None
-llm = ChatOllama(model = "qwen2.5:1.5b")
+llm = ChatOllama(model = "qwen2.5:3b")
 
 
 class extract(BaseModel):
@@ -52,83 +52,79 @@ class extract(BaseModel):
     food_type: str | None = Field(
     description="Extract the food type (vegetarian or non_vegetarian). Default is None."
 )
-system_prompt = """
-You are a constraint extraction AI.
+system_prompt = """You are a constraint extraction AI.
 
-Extract the following fields from the user's query:
+The input may be:
+1. A complete user request.
+2. The previous query followed by the user's answer to a follow-up question.
 
-1. amount
-   - Budget amount mentioned by the user.
+Extract these fields:
 
-2. protein_target
-   - Desired protein intake in grams.
-
-3. protein_consumed
-   - Protein already consumed by the user in grams.
-
-4. food_type
-   - User's food preference.
-   - Return:
-     - "vegetarian" if the user explicitly mentions veg, vegetarian, pure veg.
-     - "non_vegetarian" if the user explicitly mentions non veg, non-veg, chicken, fish, egg, meat, etc.
-   - If not mentioned, return None.
+- amount → budget
+- protein_target → desired protein intake (grams)
+- protein_consumed → protein already consumed (grams)
+- food_type → "vegetarian" or "non_vegetarian"
 
 Rules:
-- Extract only information explicitly stated by the user.
-- Never infer, estimate, or guess values.
-- If a field is not mentioned, return None.
-- If the query contains no relevant information, return None for all fields.
-- Do not perform calculations.
-- Do not assume that every number refers to every field.
-- Do not infer vegetarian or non-vegetarian preference from budget alone.
-- Standardize food_type values as:
-  - vegetarian
-  - non_vegetarian
+
+- Extract only explicitly mentioned information.
+- Never guess or calculate values.
+- Never assign one number to multiple fields.
+- If a field was already extracted previously and the latest message doesn't change it, keep the previous value.
+- Do NOT overwrite existing values with None.
+
+Follow-up handling:
+
+If the latest reply is only a number:
+- If the previous question asked for budget → amount
+- If it asked for desired protein → protein_target
+- If it asked for consumed protein → protein_consumed
+
+If the latest reply is:
+veg, vegetarian → vegetarian
+
+non veg, non-veg, chicken, egg, fish, meat → non_vegetarian
+
+Return food_type exactly as:
+- vegetarian
+- non_vegetarian
 
 Examples:
 
 User: "I have ₹300"
-amount = 300
-protein_target = None
-protein_consumed = None
-food_type = None
+amount=300
 
 User: "Need 120g protein"
-amount = None
-protein_target = 120
-protein_consumed = None
-food_type = None
+protein_target=120
 
-User: "I've already consumed 40g protein"
-amount = None
-protein_target = None
-protein_consumed = 40
-food_type = None
+User: "Already consumed 40g protein"
+protein_consumed=40
 
-User: "Veg food under 200"
-amount = 200
-protein_target = None
-protein_consumed = None
-food_type = vegetarian
+User: "Veg food under ₹200"
+amount=200
+food_type=vegetarian
 
-User: "Non veg food under 300"
-amount = 300
-protein_target = None
-protein_consumed = None
-food_type = non_vegetarian
+User: "Non veg food under ₹300"
+amount=300
+food_type=non_vegetarian
 
-User: "Need 30g protein, non veg, budget 250"
-amount = 250
-protein_target = 30
-protein_consumed = None
-food_type = non_vegetarian
+User: "Need 30g protein, budget ₹250, non veg"
+amount=250
+protein_target=30
+food_type=non_vegetarian
 
-User: "Recommend food"
-amount = None
-protein_target = None
-protein_consumed = None
-food_type = None
-"""
+Previous Query:
+I want non veg food under ₹200
+
+User:
+40
+
+amount=200
+protein_target=40
+food_type=non_vegetarian
+
+Return None only for fields that are genuinely unavailable.
+"""""
 llm_with_structure = llm.with_structured_output(extract)
 
 def constraint_extract(state: AgentState):
@@ -164,34 +160,8 @@ def constraint_extract(state: AgentState):
         )
     }
 
+def Missing_constraint(state: AgentState):
 
-class followup(BaseModel):
-
-    question : str
-system_prompt2 = """
-You are a follow-up question generation assistant.
-
-Your task is to generate a natural question asking the user only for the missing information.
-
-Possible missing information:
-- budget → user's spending limit
-- protein_target → desired protein intake in grams
-- food_type → vegetarian or non-vegetarian preference
-
-Rules:
-- Ask only for the missing information provided.
-- Do not ask for information that is already available.
-- If multiple pieces of information are missing, combine them into a single concise question.
-- Use natural, conversational language.
-- For food_type, ask whether the user prefers vegetarian or non-vegetarian food.
-- For protein_target, ask how much protein the user wants.
-- For budget, ask for the user's budget.
-- Keep the question short and clear.
-- Do not explain your reasoning.
-- Do not return anything except the question.
-"""
-
-def Missing_constraint(state:AgentState):
     missing = []
 
     if state["budget_amount"] is None:
@@ -199,36 +169,43 @@ def Missing_constraint(state:AgentState):
 
     if state["protein_target"] is None:
         missing.append("protein_target")
-    if state['food_type'] is None:
+
+    if state["food_type"] is None:
         missing.append("food_type")
+
     if not missing:
-        return {
-            "missing_constraints": [],
-            "follow_up_question": None
-        }
-    
-    llm_with_structure2 = llm.with_structured_output(followup)
-    
-    response: followup = llm_with_structure2.invoke(
-        [
-            SystemMessage(content=system_prompt2),
-               HumanMessage(
-    content=f"""
-    The user has not provided the following information:
+        return {}
 
-    {', '.join(missing)}
+    if len(missing) == 1:
 
-    Generate a follow-up question asking only for this information.
-"""
-)
-            ])
-        
-    answer = interrupt(response.question)
+        if missing[0] == "budget":
+            question = "💰 What is your budget?"
+
+        elif missing[0] == "protein_target":
+            question = "💪 What is your desired protein intake (in grams)?"
+
+        elif missing[0] == "food_type":
+            question = "🥗 Do you prefer vegetarian or non-vegetarian food?"
+
+    else:
+
+        question = "Please provide the following:\n"
+
+        if "budget" in missing:
+            question += "\n• Budget"
+
+        if "protein_target" in missing:
+            question += "\n• Protein target (grams)"
+
+        if "food_type" in missing:
+            question += "\n• Food preference (Veg / Non-Veg)"
+
+    # Pause graph
+    answer = interrupt(question)
 
     return {
-    "user_query": state["user_query"] + "\n" + answer
+        "user_query": state["user_query"] + "\n" + answer
     }
-
 
 def constraint_router(state: AgentState):
 
@@ -253,7 +230,7 @@ update_cart = None
 get_cart = None
 place_order = None
 
-llm_search = ChatOllama(model = "qwen2.5:7b")
+llm_search = ChatOllama(model = "qwen3:1.7B")
 class search_query(BaseModel):
     search_query:str = Field(description= "store only the generated query from the llm default None")
 
@@ -355,14 +332,13 @@ async def food_search(state: AgentState):
     })
 
     restaurant_text = restaurants[0]["text"]
-    print(restaurant_text)
 
     restaurant_ids = re.findall(
         r"ID:\s*(\d+)",
         restaurant_text
     )
 
-    top_five_res = restaurant_ids[:5]
+    top_five_res = restaurant_ids[:2]
 
     menus = []
 
@@ -376,120 +352,173 @@ async def food_search(state: AgentState):
             "restaurant_id": res_id,
             "menu": menu
         })
-
-    food_pattern = r" - (.*?) — ₹(\d+) \| (Veg|Non-veg)"
+    food_pattern = r"- (.*?) — ₹(\d+) \| (Veg|Non-veg).*?\(ID:\s*(\d+)\)"
 
     items = []
 
     for entry in menus:
-        print(entry["menu"])
+
         res_id = entry["restaurant_id"]
         text = entry["menu"][0]["text"]
 
         matches = re.findall(food_pattern, text)
-        print(matches)
-        for name, price, food_type in matches:
 
+        for name, price, food_type, item_id in matches:
             items.append({
-                "name": name,
-                "price": int(price),
-                "food_type": food_type,
-                "restaurant_id": res_id
-            })
+            "name": name.strip(),
+            "price": int(price),
+            "food_type": food_type.strip(),
+            "restaurant_id": res_id,
+            "item_id": int(item_id)
+        })
+    print(f"Found {len(items)} food items")
+    print("\nSEARCH RESULTS")
+    print(len(items))
+    print(items[:5])
 
     return {
         "search_results": items,
         "address_id": address_id
     }
-def budget_food_type_node(state:AgentState):
+def budget_food_type_node(state: AgentState):
+
     budget = state["budget_amount"]
     food_items = state["search_results"]
-    food_type = state['food_type']
-    if budget is None:
-        filtered = [
-        item
-        for item in food_items
-        if item["food_type"] == food_type
-    ]
-        
-    else :
-        filtered = [
-        item for item in food_items
-        if item['price']<= budget and 
-        item['food_type'] ==  food_type
-        
-    ]
-    return {"budget_food_type_filtered" : filtered}
-def Nutrition_node(state: AgentState):
-    filtered = state["budget_food_type_filtered"]
-    foods_with_nutrition = []
-    for usda_food in filtered:
-        params= {
-        "query" : usda_food["name"],
-        "api_key" : api_key 
-        }
-        response = requests.get(
-        "https://api.nal.usda.gov/fdc/v1/foods/search",
-        params=params
-        )
-        data = response.json()
-        if "foods" not in data or len(data["foods"]) == 0:
+    food_type = state["food_type"]
+
+    filtered = []
+
+    for item in food_items:
+
+        item_type = item["food_type"].lower().strip()
+
+        if item_type == "veg":
+            item_type = "vegetarian"
+
+        elif item_type == "non-veg":
+            item_type = "non_vegetarian"
+
+        if food_type is not None and item_type != food_type:
             continue
 
-        selected_food = None
+        if budget is not None and item["price"] > budget:
+            continue
 
-        for food in data["foods"]:
-            if food["dataType"] == "Survey (FNDDS)":
-                selected_food = food
-                break
+        filtered.append(item)
 
-        if selected_food is None:
+    print("\nBUDGET FILTER")
+    print(len(filtered))
+    print(filtered[:5])
+
+    return {
+        "budget_food_type_filtered": filtered
+    }
+
+def Nutrition_node(state: AgentState):
+    filtered = state["budget_food_type_filtered"]
+
+    foods_with_nutrition = []
+
+    for usda_food in filtered:
+
+        try:
+
+            params = {
+                "query": usda_food["name"],
+                "api_key": api_key
+            }
+
+            response = requests.get(
+                "https://api.nal.usda.gov/fdc/v1/foods/search",
+                params=params,
+                timeout=10
+            )
+
+            if response.status_code != 200:
+                print(f"\nUSDA API ERROR ({response.status_code})")
+                print(usda_food["name"])
+                print(response.text)
+                continue
+
+            try:
+                data = response.json()
+            except Exception:
+                print("\nInvalid JSON returned by USDA")
+                print(usda_food["name"])
+                print(response.text)
+                continue
+
+            if "foods" not in data or len(data["foods"]) == 0:
+                print(f"No USDA match -> {usda_food['name']}")
+                continue
+
+            selected_food = None
+
             for food in data["foods"]:
-                if food["dataType"] == "SR Legacy":
+                if food.get("dataType") == "Survey (FNDDS)":
                     selected_food = food
                     break
 
-        if selected_food is None:
-            for food in data["foods"]:
-                if food["dataType"] == "Branded":
-                    selected_food = food
-                    break
+            if selected_food is None:
+                for food in data["foods"]:
+                    if food.get("dataType") == "SR Legacy":
+                        selected_food = food
+                        break
 
-        if selected_food is None:
-            selected_food = data["foods"][0]
-        
-    
-        nutrients = selected_food["foodNutrients"]
-        protein = 0
-        calories = 0
-        fat = 0
-        carbs = 0
+            if selected_food is None:
+                for food in data["foods"]:
+                    if food.get("dataType") == "Branded":
+                        selected_food = food
+                        break
 
-        for nutrient in nutrients:
+            if selected_food is None:
+                selected_food = data["foods"][0]
 
-            if nutrient["nutrientName"] == "Protein":
-                protein = nutrient["value"]
+            nutrients = selected_food.get("foodNutrients", [])
 
-            elif nutrient["nutrientName"] == "Energy":
-                calories = nutrient["value"]
+            protein = 0
+            calories = 0
+            fat = 0
+            carbs = 0
 
-            elif nutrient["nutrientName"] == "Total lipid (fat)":
-                fat = nutrient["value"]
+            for nutrient in nutrients:
 
-            elif nutrient["nutrientName"] == "Carbohydrate, by difference":
-                carbs = nutrient["value"]
+                name = nutrient.get("nutrientName", "")
+                value = nutrient.get("value", 0)
 
-        usda_food["protein"] = protein
-        usda_food["calories"] = calories
-        usda_food["fat"] = fat
-        usda_food["carbs"] = carbs
+                if name == "Protein":
+                    protein = value
 
-        foods_with_nutrition.append(usda_food)
+                elif name == "Energy":
+                    calories = value
+
+                elif name == "Total lipid (fat)":
+                    fat = value
+
+                elif name == "Carbohydrate, by difference":
+                    carbs = value
+
+            item = usda_food.copy()
+
+            item["protein"] = protein
+            item["calories"] = calories
+            item["fat"] = fat
+            item["carbs"] = carbs
+
+            foods_with_nutrition.append(item)
+
+        except Exception as e:
+            print(f"\nNutrition lookup failed for: {usda_food['name']}")
+            print(e)
+            continue
+
+    print("\nWITH NUTRITION")
+    print(len(foods_with_nutrition))
+    print(foods_with_nutrition[:5])
 
     return {
         "foods_with_nutrition": foods_with_nutrition
     }
-        
 
 def protein_deficit(state: AgentState):
     target = state["protein_target"]
@@ -530,7 +559,9 @@ def Recommendation_node(state: AgentState):
     )
 
     recommended_foods = foods[:3]
-
+    print("\nFINAL RECOMMENDATION")
+    print(len(recommended_foods))
+    print(recommended_foods)
     return {
         "recommendation": recommended_foods
     }
@@ -538,6 +569,10 @@ def RecommendationDisplay_node(state):
     recommended_foods = state["recommendation"]
 
     response = "Here are the best food options for you:\n\n"
+    print("\n========== RECOMMENDATION ==========")
+    print(recommended_foods)
+    print("Length:", len(recommended_foods))
+    print("===================================\n")
 
     for i, food in enumerate(recommended_foods, start=1):
         response += (
@@ -561,162 +596,97 @@ def RecommendationDisplay_node(state):
     "user_selection": choice
     }
 
-system_prompt_food = """"You are an information extraction assistant.
-
-Your job is to extract the food selection from the user's message.
-
-You will receive:
-
-1. The user's message.
-2. The list of recommended food options.
-
-Extract only the following fields:
-
-* option_number:
-  The option number selected by the user, if mentioned (e.g. "option 2", "the third one", "number 5").
-
-* food_name:
-  The exact food name if the user mentions the food instead of the option number.
-
-Rules:
-
-* Return only structured data matching the provided schema.
-* Do not explain your reasoning.
-* If the user selects by option number, fill `option_number` and leave `food_name` as null.
-* If the user selects by food name, fill `food_name` and leave `option_number` as null.
-* If the user does not clearly choose any food, return null for both fields.
-* Match food names only from the provided recommended food list.
-
-Examples:
-
-User: "Order option 2"
-→ option_number = 2
-→ food_name = null
-
-User: "I'll take the grilled chicken."
-→ option_number = null
-→ food_name = "Grilled Chicken"
-
-User: "I want the first one."
-→ option_number = 1
-→ food_name = null
-
-User: "Give me the biryani."
-→ option_number = null
-→ food_name = "Chicken Biryani"
-"""
-class UserSelection(BaseModel):
-    option_number: int = Field(description="extract the option number if the user mentioned in the prompt default none")
-    food_name: str = Field(description="extract the food_name if it is there in the user prompt default none")
-llm_food_selection = ChatOllama(model = "qwen3:4b")
-llm_with_structure4 = llm_food_selection.with_structured_output(UserSelection)
-
-
 def FoodSelection_node(state):
 
-    query = state["user_selection"]
+    query = state["user_selection"].strip().lower()
     recommended_foods = state["recommendation"]
-
-    selection = llm_with_structure4.invoke(
-        [
-            SystemMessage(content=system_prompt_food),
-            HumanMessage(
-                content=f"""
-        Recommended Foods:
-
-    {recommended_foods}
-
-    User Message:
-
-    {query}
-    """
-            ),
-        ]
-    )
 
     selected_food = None
 
-    if selection.option_number:
+    match = re.search(r"\d+", query)
 
-        option = selection.option_number
+    if match:
+        option = int(match.group())
 
         if 1 <= option <= len(recommended_foods):
             selected_food = recommended_foods[option - 1]
 
-    elif selection.food_name:
+    if selected_food is None:
 
         for food in recommended_foods:
 
-            if food["name"].lower() == selection.food_name.lower():
+            food_name = food["name"].lower().strip()
 
+            if (
+                query == food_name
+                or query in food_name
+                or food_name in query
+            ):
                 selected_food = food
                 break
+
+    if selected_food is None:
+
+        return {
+            "assistant_response":
+            "❌ I couldn't identify which food you selected.\n"
+            "Please reply with:\n"
+            "- Option number (Example: 2)\n"
+            "- Or the exact food name."
+        }
+
+    print("\n===== SELECTED FOOD =====")
+    print(selected_food)
+    print("=========================\n")
 
     return {
         "selected_food": selected_food,
         "restaurant_id": selected_food["restaurant_id"]
     }
-async def search_select_food(state:AgentState):
+async def search_select_food(state: AgentState):
     selected_food = state["selected_food"]
-    restaurant_id = state["restaurant_id"]
-    address_id = state["address_id"]
 
-    result = await search_menu.ainvoke({
-        "query": selected_food["name"],
-        "restaurantId": restaurant_id,
-        "addressId": address_id
-})
-    return {"selected_menu" : result}
-
-def CustomizationSelection_node(state: AgentState):
-    selected_menu = state["selected_menu"]
-    menu_text = selected_menu[0]["text"]
-    match = re.search(r"ID:\s*(\d+)", menu_text)
-
-    menu_item_id = match.group(1) if match else None
-    has_customization = (
-        "Addons (" in menu_text
-        or "Variants" in menu_text
-        or "customisation" in menu_text.lower()
-    )
-
-    if has_customization:
-
-        question = (
-            "This item has customization options.\n\n"
-            "Please choose the add-ons or variants you want.\n\n"
-            f"{menu_text}"
-        )
-
-        return {
-            "follow_up_question": question,
-            "menu_item_id": menu_item_id
-        }
+    print("\n===== USING EXISTING ITEM ID =====")
+    print(selected_food)
+    print("=================================\n")
 
     return {
-        "menu_item_id": menu_item_id
+        "menu_item_id": selected_food["item_id"]
     }
-async def UpdatecartNode(state:AgentState):
+
+async def UpdatecartNode(state: AgentState):
     restaurant_id = state["restaurant_id"]
     address_id = state["address_id"]
     menu_id = state["menu_item_id"]
 
     cart_response = await update_cart.ainvoke({
-        'restaurantId' : restaurant_id,
-        'cartItems' : [{
-            "menu_item_id": menu_id,
+        "restaurantId": int(restaurant_id),
+        "cartItems": [{
+            "menu_item_id": int(menu_id),
             "quantity": 1
         }],
-        'addressId' : address_id
-        
+        "addressId": address_id
     })
 
-    return {"cart_response" : cart_response}
+    print("\n========== UPDATE CART ==========")
+    print(cart_response)
+    print("=================================\n")
+
+    return {
+        "cart_response": cart_response
+    }
+
 async def getCartNode(state:AgentState):
     address_id = state["address_id"]
     cart = await get_cart.ainvoke({
         "addressId" : address_id
     })
+
+
+    print("\n========== CART ==========")
+    print(cart)
+    print("==========================\n")
+    
     return {"cart" : cart}
 def ConfirmOrdernode(state:AgentState):
     cart = state["cart"]
@@ -795,7 +765,7 @@ async def placingOrder(state:AgentState):
 def order_router(state):
 
     if state["confirm"]:
-        return "PlaceOrder"
+        return "placingOrder"
 
     return END
 
@@ -832,23 +802,21 @@ async def create_builder():
 
     builder = StateGraph(AgentState)
 
-
-    builder.add_node("constraint_extract" , constraint_extract )
-    builder.add_node("Missing_constraint" , Missing_constraint)
-    builder.add_node("food_search" , food_search)
-    builder.add_node("budget_food_type_filter" , budget_food_type_node)
-    builder.add_node("Nutrition" , Nutrition_node)
-    builder.add_node("protein_deficit" ,  protein_deficit)
-    builder.add_node("Recommendation_node" , Recommendation_node)
-    builder.add_node("RecommendationDisplay_node" , RecommendationDisplay_node)
-    builder.add_node("FoodSelection_node" , FoodSelection_node)
-    builder.add_node("search_select_food" , search_select_food)
-    builder.add_node("CustomizationSelection_node" , CustomizationSelection_node)
-    builder.add_node("UpdatecartNode" , UpdatecartNode)
-    builder.add_node("getCartNode" , getCartNode)
-    builder.add_node("ConfirmOrdernode" , ConfirmOrdernode)
-    builder.add_node("ConfirmDecisionNode" , ConfirmDecisionNode)
-    builder.add_node("placingOrder" , placingOrder)
+    builder.add_node("constraint_extract", constraint_extract)
+    builder.add_node("Missing_constraint", Missing_constraint)
+    builder.add_node("food_search", food_search)
+    builder.add_node("budget_food_type_filter", budget_food_type_node)
+    builder.add_node("Nutrition", Nutrition_node)
+    builder.add_node("protein_deficit", protein_deficit)
+    builder.add_node("Recommendation_node", Recommendation_node)
+    builder.add_node("RecommendationDisplay_node", RecommendationDisplay_node)
+    builder.add_node("FoodSelection_node", FoodSelection_node)
+    builder.add_node("search_select_food", search_select_food)
+    builder.add_node("UpdatecartNode", UpdatecartNode)
+    builder.add_node("getCartNode", getCartNode)
+    builder.add_node("ConfirmOrdernode", ConfirmOrdernode)
+    builder.add_node("ConfirmDecisionNode", ConfirmDecisionNode)
+    builder.add_node("placingOrder", placingOrder)
 
 
     builder.add_edge(START, "constraint_extract")
@@ -870,12 +838,13 @@ async def create_builder():
     builder.add_edge("protein_deficit", "Recommendation_node")
     builder.add_edge("Recommendation_node", "RecommendationDisplay_node")
     builder.add_edge("RecommendationDisplay_node", "FoodSelection_node")
+
+    # NEW FLOW
     builder.add_edge("FoodSelection_node", "search_select_food")
-    builder.add_edge("search_select_food", "CustomizationSelection_node")
-    builder.add_edge("CustomizationSelection_node", "UpdatecartNode")
+    builder.add_edge("search_select_food", "UpdatecartNode")
+
     builder.add_edge("UpdatecartNode", "getCartNode")
     builder.add_edge("getCartNode", "ConfirmOrdernode")
-
     builder.add_edge("ConfirmOrdernode", "ConfirmDecisionNode")
 
     builder.add_conditional_edges(
@@ -889,5 +858,5 @@ async def create_builder():
 
     builder.add_edge("placingOrder", END)
 
-
     return builder
+    
